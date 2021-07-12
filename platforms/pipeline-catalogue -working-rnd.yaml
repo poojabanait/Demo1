@@ -1,0 +1,288 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates a pipeline to deploy otap-platform-catalog
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  # Application Repository
+  RepositoryName:
+    Type: String
+  Branch:
+    Type: String
+    Default: master
+Resources:
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-codepipeline-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:*
+                  - iam:ListRoles
+                  - cloudformation:Describe*
+                  - cloudFormation:List*
+                  - codecommit:List*
+                  - codecommit:Get*
+                  - codecommit:GitPull
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                  - iam:PassRole
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                  - s3:*
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:*
+                Resource: !GetAtt KmsKey.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketPolicy
+                  - s3:GetObject
+                  - s3:ListBucket
+                  #- s3:*
+                Resource:
+                  - !Join ['',['arn:aws:s3:::',!Ref ArtifactBucket, '/*']]
+                  - !Join ['',['arn:aws:s3:::',!Ref ArtifactBucket]]
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/CodePipelineCloudformationRole
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: codebuild-service
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetBucketPolicy
+                - s3:GetObject
+                - s3:ListBucket
+                - s3:*
+              Resource:
+                - !Join ['',['arn:aws:s3:::',!Ref ArtifactBucket, '/*']]
+                - !Join ['',['arn:aws:s3:::',!Ref ArtifactBucket]]
+            - Effect: Allow
+              Action:
+                - kms:*
+              Resource: !GetAtt KmsKey.Arn
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: arn:aws:logs:*:*:*
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref AWS::StackName
+      Description: !Ref AWS::StackName
+      EncryptionKey: !GetAtt KmsKey.Arn
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/python:3.6.5
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref ArtifactBucket
+          - Name: KMS_KEY
+            Type: PLAINTEXT
+            Value: !Ref KmsKey
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${ArtifactBucket}
+              - !Sub arn:aws:s3:::${ArtifactBucket}/*
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/CodePipelineCloudformationRole
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/CloudformationDeployerRole
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+        EncryptionKey:
+          Id: !GetAtt KmsKey.Arn
+          Type: KMS
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+      - Name: Source
+        # Actions:
+        # - InputArtifacts: []
+        #   Name: Source
+        #   ActionTypeId:
+        #     Category: Source
+        #     Owner: AWS
+        #     Version: '1'
+        #     Provider: CodeCommit
+        #   OutputArtifacts:
+        #   - Name: SourceArtifact
+        #   Configuration:
+        #     RepositoryName: !Ref RepositoryName
+        #     BranchName: !Ref Branch
+        #   RunOrder: 1
+        Actions:
+        - InputArtifacts: []
+          Name: Source
+          ActionTypeId:
+            Category: Source
+            Owner: ThirdParty
+            Version: '1'
+            Provider: GitHub
+          OutputArtifacts:
+          - Name: SourceArtifact
+          Configuration:
+            Owner: DataLake-Solutions
+            OAuthToken: HereNeedsToPassToken
+            Repo: !Ref RepositoryName
+            #Branch: !Ref DevelopmentBranch
+            Branch: development
+            PollForSourceChanges: true
+          RunOrder: 1
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: SourceArtifact
+          OutputArtifacts:
+          - Name: BuildArtifact
+          Configuration:
+            ProjectName: !Ref CodeBuild
+          RunOrder: 1
+      - Name: Deploy
+        Actions:
+        - Name: CreateChange
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Version: '1'
+            Provider: CloudFormation
+          InputArtifacts:
+          - Name: BuildArtifact
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            ChangeSetName: !Sub ${AWS::StackName}-applications
+            StackName: !Sub ${AWS::StackName}-applications
+            Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+            TemplatePath: BuildArtifact::transformed-template.yaml
+            RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/CloudformationDeployerRole
+          RunOrder: 1
+          RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/CodePipelineCloudformationRole
+        - Name: Approve
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Provider: Manual
+            Version: '1'
+          RunOrder: 2
+        - Name: ExecuteChangeSet
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: '1'
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: !Sub ${AWS::StackName}-applications
+            RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/CloudformationDeployerRole
+            StackName: !Sub ${AWS::StackName}-applications
+            Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+          RunOrder: 3
+          RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/CodePipelineCloudformationRole
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Used by assumed roles to encrypt/decrypt code
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Ref AWS::StackName
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:*
+            Resource: "*"
+          - Sid: Allow use of the key for CryptoGraphy Lambda
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+  KmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${AWS::StackName}
+      TargetKeyId: !Ref KmsKey
+
+

@@ -1,0 +1,21 @@
+version:      0.2
+
+phases:
+  build:
+    commands:
+      - echo ${S3_BUCKET}
+      - echo ${KMS_KEY}
+      - aws cloudformation package
+        --template-file environment.yaml
+        --s3-bucket ${S3_BUCKET}
+        --s3-prefix builds
+        --kms-key-id ${KMS_KEY}
+        --output-template-file transformed-template.yaml
+
+  post_build:
+    commands:
+      - echo Build completed on `date`
+# Below is required by CodePipeline, do not change.
+artifacts:
+  files: transformed-template.yaml
+  discard-paths: yes

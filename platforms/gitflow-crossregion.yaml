@@ -1,0 +1,1359 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Pipeline to deploy an application
+Parameters:
+  # Application Information
+  RepositoryName: # Leave blank to autogenerate a repository.
+    Type: String
+    Default: false
+  DevelopmentBranch: # Leave blank to use default branch name.
+    Type: String
+    Default: development
+  MasterBranch:  # Leave blank to use default branch name.
+    Type: String
+    Default: master
+  ApplicationName: # Application name for infrastructure and code repository.
+    Type: String
+  # Build
+  Platform: # Platform used for build environment.
+    Type: String
+    Default: python36
+    AllowedValues:
+      - docker
+      - dotnet
+      - java8
+      - nodejs10
+      - nodejs8
+      - python36
+      - python37
+  ComputeType: # Compute tpye used for build environment.
+    Type: String
+    Default: BUILD_GENERAL1_SMALL
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+  # Conditional Parameters
+  S3Deploy: # Set true to deploy static assets to S3.
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: false
+  EcsDeploy: # Set true to deploy ECS containers.
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: false
+  TestEnabled: # Set true to enable testing stage.
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: false
+  PrivilegedBuild:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: false
+  ExtractS3Deploy:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Default: false
+  # Target Accounts
+  DevelopmentAccount: # Environment account number. Set false or ommit to disable environment.
+    Type: String
+    Default: false
+  TestAccount:  # Environment account number. Set false or ommit to disable environment.
+    Type: String
+    Default: false
+  StageAccount:  # Environment account number. Set false or ommit to disable environment.
+    Type: String
+    Default: false
+  ProductionAccount:  # Environment account number. Set false or ommit to disable environment.
+    Type: String
+    Default: false
+  # Target Regions
+  CrossRegionBucketPrefix:
+    Type: String
+    Default: da-platform-catalog
+  DevRegion:
+    Type: String
+    AllowedValues:
+      - us-east-2
+      - us-east-1
+      - us-west-1
+      - us-west-2
+      - ap-east-1
+      - ap-south-1
+      - ap-northeast-2
+      - ap-southeast-1
+      - ap-southeast-2
+      - ap-northeast-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-west-3
+      - eu-north-1
+      - sa-east-1
+    Default: us-east-1
+  TestRegion:
+    Type: String
+    AllowedValues:
+      - us-east-2
+      - us-east-1
+      - us-west-1
+      - us-west-2
+      - ap-east-1
+      - ap-south-1
+      - ap-northeast-2
+      - ap-southeast-1
+      - ap-southeast-2
+      - ap-northeast-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-west-3
+      - eu-north-1
+      - sa-east-1
+    Default: us-east-1
+  StageRegion:
+    Type: String
+    AllowedValues:
+      - us-east-2
+      - us-east-1
+      - us-west-1
+      - us-west-2
+      - ap-east-1
+      - ap-south-1
+      - ap-northeast-2
+      - ap-southeast-1
+      - ap-southeast-2
+      - ap-northeast-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-west-3
+      - eu-north-1
+      - sa-east-1
+    Default: us-east-1
+  ProdRegion:
+    Type: String
+    AllowedValues:
+      - us-east-2
+      - us-east-1
+      - us-west-1
+      - us-west-2
+      - ap-east-1
+      - ap-south-1
+      - ap-northeast-2
+      - ap-southeast-1
+      - ap-southeast-2
+      - ap-northeast-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-west-3
+      - eu-north-1
+      - sa-east-1
+    Default: us-east-1
+Conditions:
+  S3Deploy: !Equals [!Ref S3Deploy, true]
+  Extract: !Not [!Equals [!Ref ExtractS3Deploy, false]]
+  EcsDeploy: !Equals [!Ref EcsDeploy, true]
+  PrivilegedBuild:
+    Fn::Or:
+      - !Equals [!Ref PrivilegedBuild, true]
+      - !Equals [!Ref Platform, docker] 
+  TestEnabled: !Equals [!Ref TestEnabled, true]
+  DeployDevelopment: !Not [!Equals [!Ref DevelopmentAccount, false]]
+  DeployTest: !Not [!Equals [!Ref TestAccount, false]]
+  DeployStage: !Not [!Equals [!Ref StageAccount, false]]
+  DeployProduction: !Not [!Equals [!Ref ProductionAccount, false]]
+  CreateRepo: !Equals [!Ref RepositoryName, false]
+  CreateDevelopmentPipeline: # This condition is true when a development or test account is provided.
+    Fn::Or:
+      - Condition: DeployDevelopment
+      - Condition: DeployTest
+  CreateMasterPipeline:  # This condition is true when a development or test account is provided.
+    Fn::Or:
+      - Condition: DeployStage
+      - Condition: DeployProduction
+  CrossDev: !Not [!Equals [!Ref DevRegion, us-east-1]]
+  CrossTest: !Not [!Equals [!Ref TestRegion, us-east-1]]
+  CrossStage: !Not [!Equals [!Ref StageRegion, us-east-1]]
+  CrossProd: !Not [!Equals [!Ref ProdRegion, us-east-1]]
+  MultiRegion: !Or
+    - Condition: CrossDev
+    - Condition: CrossTest
+    - Condition: CrossStage
+    - Condition: CrossProd
+Mappings:
+  BuildInfo: # Build environments used by CodeBuild.
+    docker:
+      Image: aws/codebuild/docker:18.09.0
+    dotnet:
+      Image: aws/codebuild/dot-net:core-2.1
+    java8:
+      Image: aws/codebuild/java:openjdk-8
+    nodejs10:
+      Image: aws/codebuild/nodejs:10.14.1
+    nodejs8:
+      Image: aws/codebuild/nodejs:8.11.0
+    python36:
+      Image: aws/codebuild/python:3.6.5
+    python37:
+      Image: aws/codebuild/python:3.7.1
+Resources:
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-codepipeline-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:*
+                  - iam:ListRoles
+                  - cloudformation:Describe*
+                  - cloudFormation:List*
+                  - codecommit:List*
+                  - codecommit:Get*
+                  - codecommit:GitPull
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                  - ecs:*
+                  - iam:PassRole
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:*
+                Resource: !GetAtt KmsKey.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketPolicy
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${DevRegion}/*
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${DevRegion}
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${TestRegion}/*
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${TestRegion}
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${StageRegion}/*
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${StageRegion}
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${ProdRegion}/*
+                  - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${ProdRegion}
+                  - !Join ['',['arn:aws:s3:::',!Ref ArtifactBucket, '/*']]
+                  - !Join ['',['arn:aws:s3:::',!Ref ArtifactBucket]]
+              - Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                  - lambda:InvokeFunction
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - arn:aws:iam::*:role/CodePipelineCloudformationRole
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeCommitReadOnly
+      Policies:
+      - PolicyName: codebuild-service
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetBucketPolicy
+                - s3:GetObject
+                - s3:ListBucket
+              Resource:
+                - "*"
+            - Effect: Allow
+              Action:
+                - kms:*
+              Resource: !GetAtt KmsKey.Arn
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: arn:aws:logs:*:*:*
+            - Effect: Allow
+              Action:
+                - ecr:GetDownloadUrlForLayer
+                - ecr:BatchGetImage
+                - ecr:BatchCheckLayerAvailability
+                - ecr:PutImage
+                - ecr:InitiateLayerUpload
+                - ecr:UploadLayerPart
+                - ecr:CompleteLayerUpload
+                - ecr:GetAuthorizationToken
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ssm:DescribeParameters
+                - ssm:GetParametersByPath
+                - ssm:GetParameters
+                - ssm:GetParameter
+              Resource: '*'
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref AWS::StackName
+      Description: !Ref AWS::StackName
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Cache:
+        Type: S3
+        Location: !Sub ${ArtifactBucket}/.cache
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref ComputeType
+        Image: !FindInMap [BuildInfo, !Ref Platform, Image]
+        PrivilegedMode: !If [PrivilegedBuild, true, false]
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref ArtifactBucket
+          - Name: KMS_KEY
+            Type: PLAINTEXT
+            Value: !Ref KmsKey
+          - Name: ACCOUNT_ID
+            Type: PLAINTEXT
+            Value: !Ref AWS::AccountId
+          - Name: APPLICATION_NAME
+            Type: PLAINTEXT
+            Value: !Ref ApplicationName
+          - !If
+            - EcsDeploy
+            - Name: REPOSITORY_URI
+              Type: PLAINTEXT
+              Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcsRepository}
+            - !Ref "AWS::NoValue"
+          - !If
+            - CrossDev
+            - Name: DevRegion
+              Type: PLAINTEXT
+              Value: !Ref DevRegion
+            - !Ref "AWS::NoValue"
+          - !If
+            - CrossTest
+            - Name: TestRegion
+              Type: PLAINTEXT
+              Value: !Ref TestRegion
+            - !Ref "AWS::NoValue"
+          - !If
+            - CrossStage
+            - Name: StageRegion
+              Type: PLAINTEXT
+              Value: !Ref StageRegion
+            - !Ref "AWS::NoValue"
+          - !If
+            - CrossProd
+            - Name: ProdRegion
+              Type: PLAINTEXT
+              Value: !Ref ProdRegion
+            - !Ref "AWS::NoValue"
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+  TestSuite:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-Test
+      Description: !Sub ${AWS::StackName}-Test
+      # EncryptionKey: !GetAtt KmsKey.Arn
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref ComputeType
+        Image: !FindInMap [BuildInfo, !Ref Platform, Image]
+        # EnvironmentVariables:
+        #   - Name: S3_BUCKET
+        #     Type: PLAINTEXT
+        #     Value: !Ref ArtifactBucket
+        #   - Name: KMS_KEY
+        #     Type: PLAINTEXT
+        #     Value: !Ref KmsKey
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: test/buildspec.yaml
+      TimeoutInMinutes: 10
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - NoncurrentVersionExpirationInDays: 7
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+      # NotificationConfiguration:
+      #   LambdaConfigurations:
+      #     - Event: 's3:ObjectCreated:*'
+      #       Function: !GetAtt DecryptArtifact.Arn
+      #       Filter:
+      #         S3Key:
+      #           Rules:
+      #             - Name: 'prefix'
+      #               Value: 'platforms-applicatio/BuildArtif'
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${ArtifactBucket}
+              - !Sub arn:aws:s3:::${ArtifactBucket}/*
+            Principal:
+              AWS:
+                - !If
+                  - DeployDevelopment
+                  - !Sub arn:aws:iam::${DevelopmentAccount}:role/CodePipelineCloudformationRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployDevelopment
+                  - !Sub arn:aws:iam::${DevelopmentAccount}:role/CloudformationDeployerRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployTest
+                  - !Sub arn:aws:iam::${TestAccount}:role/CodePipelineCloudformationRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployTest
+                  - !Sub arn:aws:iam::${TestAccount}:role/CloudformationDeployerRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployStage
+                  - !Sub arn:aws:iam::${StageAccount}:role/CodePipelineCloudformationRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployStage
+                  - !Sub arn:aws:iam::${StageAccount}:role/CloudformationDeployerRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployProduction
+                  - !Sub arn:aws:iam::${ProductionAccount}:role/CodePipelineCloudformationRole
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployProduction
+                  - !Sub arn:aws:iam::${ProductionAccount}:role/CloudformationDeployerRole
+                  - !Ref "AWS::NoValue"
+                # Repeat the above for each target account.
+  DevelopmentPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreateDevelopmentPipeline
+    Properties:
+      ArtifactStores:
+        - ArtifactStore: 
+            Type: S3
+            Location: !Ref ArtifactBucket
+            EncryptionKey:
+              Id: !GetAtt KmsKey.Arn
+              Type: KMS
+          Region: us-east-1
+        - !If
+          - CrossDev
+          - ArtifactStore: 
+              Type: S3
+              Location: !Sub ${AWS::AccountId}-${CrossRegionBucketPrefix}-${DevRegion}
+            Region: !Ref DevRegion
+          - !Ref "AWS::NoValue" 
+        - !If
+          - CrossTest
+          - ArtifactStore: 
+              Type: S3
+              Location: !Sub ${AWS::AccountId}-${CrossRegionBucketPrefix}-${TestRegion}
+            Region: !Ref TestRegion
+          - !Ref "AWS::NoValue" 
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - InputArtifacts: []
+          Name: Source
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Version: '1'
+            Provider: CodeCommit
+          OutputArtifacts:
+          - Name: SourceArtifact
+          Configuration:
+            RepositoryName:
+              Fn::If:
+                - CreateRepo
+                - !GetAtt CodeCommitRepository.Name
+                - !Ref RepositoryName
+            BranchName: !Ref DevelopmentBranch
+            PollForSourceChanges: false
+          RunOrder: 1
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: SourceArtifact
+          OutputArtifacts:
+          - Name: BuildArtifact
+          Configuration:
+            ProjectName: !Ref CodeBuild
+          RunOrder: 1
+      - !If
+        - MultiRegion
+        - Name: Decrypt
+          Actions:
+          - Name: DecryptKms
+            ActionTypeId:
+              Category: Invoke
+              Owner: AWS
+              Version: '1'
+              Provider: Lambda
+            Configuration:
+              FunctionName: !Ref DecryptArtifact
+              UserParameters: !Sub '{"artifact": "BuildArtifact", "DevBucket": "${AWS::AccountId}-${CrossRegionBucketPrefix}-${DevRegion}"}'
+            InputArtifacts:
+            - Name: BuildArtifact
+            RunOrder: 1
+        -
+          !Ref "AWS::NoValue"
+      - !If
+        - DeployDevelopment
+        - Name: DeployDevelopment
+          Actions:
+          - Name: CreateChange
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: '1'
+              Provider: CloudFormation
+            InputArtifacts:
+            - Name: BuildArtifact
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              ChangeSetName: !Sub ${AWS::StackName}-development
+              StackName: !Sub ${AWS::StackName}-development
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              TemplatePath: 
+                !If
+                  - CrossDev
+                  - !Sub BuildArtifact::transformed-template-${DevRegion}.yaml
+                  - BuildArtifact::transformed-template.yaml
+              ParameterOverrides: !Sub '{"ApplicationEnvironmentTag": "development", "ApplicationName": "${ApplicationName}"}'
+              RoleArn: !Sub arn:aws:iam::${DevelopmentAccount}:role/CloudformationDeployerRole
+            Region: !Ref DevRegion
+            RunOrder: 1
+            RoleArn: !Sub arn:aws:iam::${DevelopmentAccount}:role/CodePipelineCloudformationRole
+          - Name: ExecuteChangeSet
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: !Sub ${AWS::StackName}-development
+              RoleArn: !Sub arn:aws:iam::${DevelopmentAccount}:role/CloudformationDeployerRole
+              StackName: !Sub ${AWS::StackName}-development
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+            Region: !Ref DevRegion
+            RunOrder: 3
+            RoleArn: !Sub arn:aws:iam::${DevelopmentAccount}:role/CodePipelineCloudformationRole
+          - !If
+            - S3Deploy
+            - Name: S3Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Sub "${DevelopmentAccount}-${ApplicationName}-development"
+                Extract: !Ref ExtractS3Deploy
+                ObjectKey: 
+                  !If
+                    - Extract
+                    - !Ref "AWS::NoValue"
+                    - "deploy/deploy.zip"
+              InputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 4
+              RoleArn: !Sub arn:aws:iam::${DevelopmentAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - EcsDeploy
+            - Name: DeployECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              Configuration:
+                ClusterName: !Sub ${ApplicationName}-development
+                ServiceName: !Sub ${ApplicationName}-development
+                FileName: ecs.json
+              InputArtifacts:
+              - Name: BuildArtifact
+              RunOrder: 5
+              RoleArn: !Sub arn:aws:iam::${DevelopmentAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - TestEnabled
+            - Name: Test
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+              - Name: SourceArtifact
+              Configuration:
+                ProjectName: !Ref TestSuite
+              RunOrder: 6
+            -
+              !Ref "AWS::NoValue"
+        -
+          !Ref "AWS::NoValue"
+      - !If
+        - DeployTest
+        - Name: DeployTest
+          Actions:
+          - Name: CreateChange
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: '1'
+              Provider: CloudFormation
+            InputArtifacts:
+            - Name: BuildArtifact
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              ChangeSetName: !Sub ${AWS::StackName}-test
+              StackName: !Sub ${AWS::StackName}-test
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              TemplatePath: 
+                !If
+                  - CrossTest
+                  - !Sub BuildArtifact::transformed-template-${TestRegion}.yaml
+                  - BuildArtifact::transformed-template.yaml
+              ParameterOverrides: !Sub '{"ApplicationEnvironmentTag": "test", "ApplicationName": "${ApplicationName}"}'
+              RoleArn: !Sub arn:aws:iam::${TestAccount}:role/CloudformationDeployerRole
+            Region: !Ref TestRegion
+            RunOrder: 1
+            RoleArn: !Sub arn:aws:iam::${TestAccount}:role/CodePipelineCloudformationRole
+          - Name: Approve
+            ActionTypeId:
+              Category: Approval
+              Owner: AWS
+              Provider: Manual
+              Version: '1'
+            RunOrder: 2
+          - Name: ExecuteChangeSet
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: !Sub ${AWS::StackName}-test
+              RoleArn: !Sub arn:aws:iam::${TestAccount}:role/CloudformationDeployerRole
+              StackName: !Sub ${AWS::StackName}-test
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+            Region: !Ref TestRegion
+            RunOrder: 3
+            RoleArn: !Sub arn:aws:iam::${TestAccount}:role/CodePipelineCloudformationRole
+          - !If
+            - S3Deploy
+            - Name: S3Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Sub "${TestAccount}-${ApplicationName}-test"
+                Extract: !Ref ExtractS3Deploy
+                ObjectKey: 
+                  !If
+                    - Extract
+                    - !Ref "AWS::NoValue"
+                    - "deploy/deploy.zip"
+              InputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 4
+              RoleArn: !Sub arn:aws:iam::${TestAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - EcsDeploy
+            - Name: DeployECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              Configuration:
+                ClusterName: !Sub ${ApplicationName}-test
+                ServiceName: !Sub ${ApplicationName}-test
+                FileName: ecs.json
+              InputArtifacts:
+              - Name: BuildArtifact
+              RunOrder: 5
+              RoleArn: !Sub arn:aws:iam::${TestAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - TestEnabled
+            - Name: Test
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+              - Name: SourceArtifact
+              Configuration:
+                ProjectName: !Ref TestSuite
+              RunOrder: 6
+            -
+              !Ref "AWS::NoValue"
+        -
+          !Ref "AWS::NoValue"
+  MasterPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreateMasterPipeline
+    Properties:
+      ArtifactStores:
+        - ArtifactStore: 
+            Type: S3
+            Location: !Ref ArtifactBucket
+            EncryptionKey:
+              Id: !GetAtt KmsKey.Arn
+              Type: KMS
+          Region: us-east-1
+        - !If
+          - CrossStage
+          - ArtifactStore: 
+              Type: S3
+              Location: !Sub ${AWS::AccountId}-${CrossRegionBucketPrefix}-${StageRegion}
+            Region: !Ref StageRegion
+          - !Ref "AWS::NoValue" 
+        - !If
+          - CrossProd
+          - ArtifactStore: 
+              Type: S3
+              Location: !Sub ${AWS::AccountId}-${CrossRegionBucketPrefix}-${ProdRegion}
+            Region: !Ref ProdRegion
+          - !Ref "AWS::NoValue"
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - InputArtifacts: []
+          Name: Source
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Version: '1'
+            Provider: CodeCommit
+          OutputArtifacts:
+          - Name: SourceArtifact
+          Configuration:
+            RepositoryName:
+              Fn::If:
+                - CreateRepo
+                - !GetAtt CodeCommitRepository.Name
+                - !Ref RepositoryName
+            BranchName: !Ref MasterBranch
+            PollForSourceChanges: false
+          RunOrder: 1
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: SourceArtifact
+          OutputArtifacts:
+          - Name: BuildArtifact
+          Configuration:
+            ProjectName: !Ref CodeBuild
+          RunOrder: 1
+      - !If
+        - DeployStage
+        - Name: DeployStage
+          Actions:
+          - Name: CreateChange
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: '1'
+              Provider: CloudFormation
+            InputArtifacts:
+            - Name: BuildArtifact
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              ChangeSetName: !Sub ${AWS::StackName}-stage
+              StackName: !Sub ${AWS::StackName}-stage
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              TemplatePath: 
+                !If
+                  - CrossStage
+                  - !Sub BuildArtifact::transformed-template-${StageRegion}.yaml
+                  - BuildArtifact::transformed-template.yaml
+              ParameterOverrides: !Sub '{"ApplicationEnvironmentTag": "stage", "ApplicationName": "${ApplicationName}"}'
+              RoleArn: !Sub arn:aws:iam::${StageAccount}:role/CloudformationDeployerRole
+            Region: !Ref StageRegion
+            RunOrder: 1
+            RoleArn: !Sub arn:aws:iam::${StageAccount}:role/CodePipelineCloudformationRole
+          - Name: Approve
+            ActionTypeId:
+              Category: Approval
+              Owner: AWS
+              Provider: Manual
+              Version: '1'
+            RunOrder: 2
+          - Name: ExecuteChangeSet
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: !Sub ${AWS::StackName}-stage
+              RoleArn: !Sub arn:aws:iam::${StageAccount}:role/CloudformationDeployerRole
+              StackName: !Sub ${AWS::StackName}-stage
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+            Region: !Ref StageRegion
+            RunOrder: 3
+            RoleArn: !Sub arn:aws:iam::${StageAccount}:role/CodePipelineCloudformationRole
+          - !If
+            - S3Deploy
+            - Name: S3Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Sub "${StageAccount}-${ApplicationName}-stage"
+                Extract: !Ref ExtractS3Deploy
+                ObjectKey: 
+                  !If
+                    - Extract
+                    - !Ref "AWS::NoValue"
+                    - "deploy/deploy.zip"
+              InputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 4
+              RoleArn: !Sub arn:aws:iam::${StageAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - EcsDeploy
+            - Name: DeployECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              Configuration:
+                ClusterName: !Sub ${ApplicationName}-stage
+                ServiceName: !Sub ${ApplicationName}-stage
+                FileName: ecs.json
+              InputArtifacts:
+              - Name: BuildArtifact
+              RunOrder: 5
+              RoleArn: !Sub arn:aws:iam::${StageAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - TestEnabled
+            - Name: Test
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+              - Name: SourceArtifact
+              Configuration:
+                ProjectName: !Ref TestSuite
+              RunOrder: 6
+            -
+              !Ref "AWS::NoValue"
+        -
+          !Ref "AWS::NoValue"
+      - !If
+        - DeployProduction
+        - Name: DeployProduction
+          Actions:
+          - Name: CreateChange
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: '1'
+              Provider: CloudFormation
+            InputArtifacts:
+            - Name: BuildArtifact
+            Configuration:
+              ActionMode: CHANGE_SET_REPLACE
+              ChangeSetName: !Sub ${AWS::StackName}-production
+              StackName: !Sub ${AWS::StackName}-production
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+              TemplatePath: 
+                !If
+                  - CrossProd
+                  - !Sub BuildArtifact::transformed-template-${ProdRegion}.yaml
+                  - BuildArtifact::transformed-template.yaml
+              ParameterOverrides: !Sub '{"ApplicationEnvironmentTag": "production", "ApplicationName": "${ApplicationName}"}'
+              RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/CloudformationDeployerRole
+            Region: !Ref ProdRegion
+            RunOrder: 1
+            RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/CodePipelineCloudformationRole
+          - Name: Approve
+            ActionTypeId:
+              Category: Approval
+              Owner: AWS
+              Provider: Manual
+              Version: '1'
+            RunOrder: 2
+          - Name: ExecuteChangeSet
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Provider: CloudFormation
+              Version: '1'
+            Configuration:
+              ActionMode: CHANGE_SET_EXECUTE
+              ChangeSetName: !Sub ${AWS::StackName}-production
+              RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/CloudformationDeployerRole
+              StackName: !Sub ${AWS::StackName}-production
+              Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+            Region: !Ref ProdRegion
+            RunOrder: 3
+            RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/CodePipelineCloudformationRole
+          - !If
+            - S3Deploy
+            - Name: S3Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Sub "${ProductionAccount}-${ApplicationName}-production"
+                Extract: !Ref ExtractS3Deploy
+                ObjectKey: 
+                  !If
+                    - Extract
+                    - !Ref "AWS::NoValue"
+                    - "deploy/deploy.zip"
+              InputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 4
+              RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - EcsDeploy
+            - Name: DeployECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              Configuration:
+                ClusterName: !Sub ${ApplicationName}-production
+                ServiceName: !Sub ${ApplicationName}-production
+                FileName: ecs.json
+              InputArtifacts:
+              - Name: BuildArtifact
+              RunOrder: 5
+              RoleArn: !Sub arn:aws:iam::${ProductionAccount}:role/CodePipelineCloudformationRole
+            -
+              !Ref "AWS::NoValue"
+          - !If
+            - TestEnabled
+            - Name: Test
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+              - Name: SourceArtifact
+              Configuration:
+                ProjectName: !Ref TestSuite
+              RunOrder: 6
+            -
+              !Ref "AWS::NoValue"
+        -
+          !Ref "AWS::NoValue"
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Used by assumed roles to encrypt/decrypt code
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Ref AWS::StackName
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:*
+            Resource: "*"
+          - Sid: Allow use of the key for CryptoGraphy Lambda
+            Effect: Allow
+            Principal:
+              AWS:
+                - !If
+                  - DeployDevelopment
+                  - !Sub arn:aws:iam::${DevelopmentAccount}:root
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployTest
+                  - !Sub arn:aws:iam::${TestAccount}:root
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployStage
+                  - !Sub arn:aws:iam::${StageAccount}:root
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployProduction
+                  - !Sub arn:aws:iam::${ProductionAccount}:root
+                  - !Ref "AWS::NoValue"
+                # Repeat the above for each target account.
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+  KmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${AWS::StackName}
+      TargetKeyId: !Ref KmsKey
+  CloudWatchEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - !If
+                - CreateDevelopmentPipeline
+                - Effect: Allow
+                  Action: codepipeline:StartPipelineExecution
+                  Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DevelopmentPipeline}
+                - !Ref "AWS::NoValue"
+              - !If
+                - CreateMasterPipeline
+                - Effect: Allow
+                  Action: codepipeline:StartPipelineExecution
+                  Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${MasterPipeline}
+                - !Ref "AWS::NoValue"
+  DevelopmentCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Condition: CreateDevelopmentPipeline
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - Fn::If:
+              - CreateRepo
+              - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepository.Name}
+              - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref DevelopmentBranch
+      Targets:
+        - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${DevelopmentPipeline}
+          RoleArn: !GetAtt CloudWatchEventRole.Arn
+          Id: codepipeline-AppPipeline
+  MasterCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Condition: CreateMasterPipeline
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - Fn::If:
+            - CreateRepo
+            - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${CodeCommitRepository.Name}
+            - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref MasterBranch
+      Targets:
+        - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${MasterPipeline}
+          RoleArn: !GetAtt CloudWatchEventRole.Arn
+          Id: codepipeline-AppPipeline
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Condition: CreateRepo
+    Properties:
+      RepositoryName: !Ref ApplicationName
+  EcsRepository:
+    Type: AWS::ECR::Repository
+    Condition: EcsDeploy
+    Properties:
+      RepositoryName: !Ref ApplicationName
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: AllowPushPull
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                - !If
+                  - DeployDevelopment
+                  - !Sub arn:${AWS::Partition}:iam::${DevelopmentAccount}:root
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployTest
+                  - !Sub arn:${AWS::Partition}:iam::${TestAccount}:root
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployStage
+                  - !Sub arn:${AWS::Partition}:iam::${StageAccount}:root
+                  - !Ref "AWS::NoValue"
+                - !If
+                  - DeployProduction
+                  - !Sub arn:${AWS::Partition}:iam::${ProductionAccount}:root
+                  - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployDevelopment
+                #   - !Sub arn:${AWS::Partition}:iam::${DevelopmentAccount}:role/CodePipelineCloudformationRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployDevelopment
+                #   - !Sub arn:${AWS::Partition}:iam::${DevelopmentAccount}:role/CloudformationDeployerRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployTest
+                #   - !Sub arn:${AWS::Partition}:iam::${TestAccount}:role/CodePipelineCloudformationRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployTest
+                #   - !Sub arn:${AWS::Partition}:iam::${TestAccount}:role/CloudformationDeployerRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployStage
+                #   - !Sub arn:${AWS::Partition}:iam::${StageAccount}:role/CodePipelineCloudformationRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployStage
+                #   - !Sub arn:${AWS::Partition}:iam::${StageAccount}:role/CloudformationDeployerRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployProduction
+                #   - !Sub arn:${AWS::Partition}:iam::${ProductionAccount}:role/CodePipelineCloudformationRole
+                #   - !Ref "AWS::NoValue"
+                # - !If
+                #   - DeployProduction
+                #   - !Sub arn:${AWS::Partition}:iam::${ProductionAccount}:role/CloudformationDeployerRole
+                #   - !Ref "AWS::NoValue"
+            Action:
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:PutImage"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+  DecryptArtifact:
+    Type: AWS::Serverless::Function
+    Condition: MultiRegion
+    Properties:
+      Runtime: python3.6
+      Handler: 'index.handler'
+      Timeout: 30
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${DevRegion}/*
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${DevRegion}
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${TestRegion}/*
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${TestRegion}
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${StageRegion}/*
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${StageRegion}
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${ProdRegion}/*
+                - !Sub arn:aws:s3:::${AWS::AccountId}-${CrossRegionBucketPrefix}-${ProdRegion}
+            - Effect: Allow
+              Action: 
+                - codepipeline:PutJobSuccessResult
+                - codepipeline:PutJobFailureResult
+              Resource:
+                '*'
+      InlineCode: !Sub |
+          import boto3, json
+          import traceback
+
+          code_pipeline = boto3.client('codepipeline')
+
+          def handle_key(obj):
+              if obj.ssekms_key_id is not None:
+                  obj.download_file('/tmp/hello')
+                  obj.upload_file('/tmp/hello')
+
+          def put_job_success(job, message):
+              code_pipeline.put_job_success_result(jobId=job)
+
+          def put_job_failure(job, message):
+              code_pipeline.put_job_failure_result(jobId=job, failureDetails={'message': message, 'type': 'JobFailed'})
+
+          def get_user_params(job_data):
+              try:
+                  user_parameters = job_data['actionConfiguration']['configuration']['UserParameters']
+                  decoded_parameters = json.loads(user_parameters)
+
+              except Exception as e:
+                  raise Exception('UserParameters could not be decoded as JSON')
+
+              if 'artifact' not in decoded_parameters:
+                  raise Exception('Your UserParameters JSON must include the artifact name')
+
+              if 'DevBucket' not in decoded_parameters:
+                  raise Exception('Your UserParameters JSON must include the bucket parameter')
+
+              return decoded_parameters
+
+          def handler(event, context):
+              print(json.dumps(event))
+              job_id = event['CodePipeline.job']['id']
+              job_data = event['CodePipeline.job']['data']
+
+              try:
+                params = get_user_params(job_data)
+                for artifact in job_data["inputArtifacts"]:
+                    if '${DevRegion}' != '${AWS::Region}':
+                        handle_key(boto3.resource('s3').Object(params['DevBucket'], artifact["location"]["s3Location"]["objectKey"]))
+                    if '${TestRegion}' != '${AWS::Region}':
+                        handle_key(boto3.resource('s3').Object(params['TestBucket'], artifact["location"]["s3Location"]["objectKey"]))
+                    if '${StageRegion}' != '${AWS::Region}':
+                        handle_key(boto3.resource('s3').Object(params['StageBucket'], artifact["location"]["s3Location"]["objectKey"]))
+                    if '${ProdRegion}' != '${AWS::Region}':
+                        handle_key(boto3.resource('s3').Object(params['ProdBucket'], artifact["location"]["s3Location"]["objectKey"]))
+                put_job_success(job_id, 'Boosh')
+              except Exception as e:
+                  print('Function failed due to exception.')
+                  print(e)
+                  traceback.print_exc()
+                  put_job_failure(job_id, 'Function exception: ' + str(e))
+
+  DecryptArtifactLogs:
+    Type: AWS::Logs::LogGroup
+    DependsOn: DecryptArtifact
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${DecryptArtifact}
+      RetentionInDays: 7

@@ -1,0 +1,14 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Defines stacks deployed from platforms
+Resources: 
+  CICDYBJobsProject:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: platforms/gitflow.yaml
+      Parameters:
+        ApplicationName: cicd20210707-datalake-ybjobs1
+        RepositoryName: cicd20210707-datalake-ybjobs1
+        DevelopmentAccount: '956570010172'
+       # TestAccount: '849656537405'
+...
